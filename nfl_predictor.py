@@ -98,7 +98,8 @@ def calculate_features_for_game(game, completed_games_df, date_col, window_size=
     return features
 
 def load_historical_games(seasons=None):
-    """Load historical NFL games from nfl_data_py."""
+    """Load historical NFL games from nfl_data_py.
+    Includes both regular season and postseason/playoff games."""
     if not NFL_DATA_PY_AVAILABLE:
         raise ImportError("nfl_data_py is required. Install with: pip install nfl-data-py")
     
@@ -109,6 +110,7 @@ def load_historical_games(seasons=None):
     all_games = []
     for season in seasons:
         try:
+            # nfl_data_py schedule includes regular season and postseason games
             season_games = nfl.import_schedules([season])
             if len(season_games) > 0:
                 all_games.append(season_games)
@@ -120,7 +122,7 @@ def load_historical_games(seasons=None):
     
     games = pd.concat(all_games, ignore_index=True)
     
-    # Filter to completed games only
+    # Filter to completed games only (includes regular season and playoff games)
     games = games[games['home_score'].notna() & games['away_score'].notna()].copy()
     
     # Sort by date
@@ -140,61 +142,126 @@ def load_historical_games(seasons=None):
     return games, date_col
 
 def load_upcoming_games(season=None):
-    """Load upcoming NFL games that haven't been played yet."""
+    """Load NFL games for predictions - includes current week games even if they've started.
+    Includes both regular season and postseason/playoff games.
+    Note: Playoff games for a season occur in January/February of the next year."""
     if not NFL_DATA_PY_AVAILABLE:
         raise ImportError("nfl_data_py is required. Install with: pip install nfl-data-py")
     
     if season is None:
-        season = datetime.now().year
+        current_date = datetime.now()
+        current_month = current_date.month
+        current_year = current_date.year
+        
+        # If we're in January or February, we might be in postseason
+        # Playoff games belong to the previous year's season (e.g., Jan 2025 = 2024 season playoffs)
+        if current_month <= 2:
+            # Check both current year and previous year for playoff games
+            seasons_to_load = [current_year - 1, current_year]
+        else:
+            # Regular season, use current year
+            seasons_to_load = [current_year]
+    else:
+        seasons_to_load = [season]
     
     try:
-        all_games = nfl.import_schedules([season])
+        all_games_list = []
+        for season_to_load in seasons_to_load:
+            try:
+                season_games = nfl.import_schedules([season_to_load])
+                if len(season_games) > 0:
+                    all_games_list.append(season_games)
+            except Exception as e:
+                print(f"Warning: Could not load season {season_to_load}: {e}")
+                continue
         
-        # Filter to games without scores (upcoming)
-        upcoming = all_games[
-            (all_games['home_score'].isna()) | (all_games['away_score'].isna())
-        ].copy()
+        if not all_games_list:
+            return pd.DataFrame(), None
+        
+        all_games = pd.concat(all_games_list, ignore_index=True)
         
         # Get date column
         date_col = None
-        if 'gameday' in upcoming.columns:
+        if 'gameday' in all_games.columns:
             date_col = 'gameday'
-            upcoming[date_col] = pd.to_datetime(upcoming[date_col], errors='coerce')
-        elif 'game_date' in upcoming.columns:
+            all_games[date_col] = pd.to_datetime(all_games[date_col], errors='coerce')
+        elif 'game_date' in all_games.columns:
             date_col = 'game_date'
-            upcoming[date_col] = pd.to_datetime(upcoming[date_col], errors='coerce')
+            all_games[date_col] = pd.to_datetime(all_games[date_col], errors='coerce')
         
         if date_col:
-            upcoming = upcoming.sort_values(date_col).reset_index(drop=True)
+            all_games = all_games.sort_values(date_col).reset_index(drop=True)
         
-        return upcoming, date_col
+        # Return all games (we'll filter by date in get_next_week_games)
+        # This includes both regular season and postseason games
+        return all_games, date_col
     except Exception as e:
-        print(f"Error loading upcoming games: {e}")
+        print(f"Error loading games: {e}")
         return pd.DataFrame(), None
 
 def get_next_week_games(upcoming_games_df, date_col):
-    """Get games for the next week (next 7 days)."""
+    """Get games for the current week. 
+    Shows games even after they start, until Tuesday night when we update for next week.
+    On Tuesday night, filters out completed games from previous week."""
     if upcoming_games_df.empty:
         return pd.DataFrame()
     
     if date_col and date_col in upcoming_games_df.columns:
-        today = datetime.now().date()
-        next_week = today + timedelta(days=7)
+        now = datetime.now()
+        today = now.date()
+        current_weekday = now.weekday()  # 0=Monday, 1=Tuesday, ..., 6=Sunday
         
-        # Convert date column to date only
+        # Convert date column to date
         upcoming_games_df = upcoming_games_df.copy()
         upcoming_games_df['game_date_only'] = pd.to_datetime(upcoming_games_df[date_col], errors='coerce').dt.date
         
-        # Filter games in the next week
-        next_week_games = upcoming_games_df[
-            (upcoming_games_df['game_date_only'] >= today) & 
-            (upcoming_games_df['game_date_only'] <= next_week)
+        # NFL week typically runs Tuesday (after MNF) to Monday (MNF)
+        # Determine the start of current week based on day
+        # On Tuesday 8pm+, we transition to the new week
+        # Otherwise, we're showing the current/ongoing week
+        
+        if current_weekday == 1 and now.hour >= 20:  # Tuesday 8pm or later
+            # New week starts - show games from this Tuesday through next Monday
+            week_start = today  # Today (Tuesday)
+            week_end = today + timedelta(days=6)  # Next Monday
+        elif current_weekday == 1:  # Tuesday before 8pm
+            # Still showing previous week's games (last Tuesday through last Monday)
+            week_start = today - timedelta(days=7)  # Last Tuesday
+            week_end = today - timedelta(days=1)  # Last Monday
+        elif current_weekday == 0:  # Monday
+            # Show current week (last Tuesday to this Monday)
+            week_start = today - timedelta(days=6)  # Last Tuesday
+            week_end = today  # Today (Monday)
+        else:  # Wednesday-Sunday
+            # Show current week (last Tuesday to next Monday)
+            days_since_tuesday = (current_weekday - 1) if current_weekday > 1 else 0
+            week_start = today - timedelta(days=days_since_tuesday)
+            week_end = today + timedelta(days=(8 - current_weekday))  # Next Monday
+        
+        # Filter games in the current week (including games that have started)
+        current_week_games = upcoming_games_df[
+            (upcoming_games_df['game_date_only'] >= week_start) & 
+            (upcoming_games_df['game_date_only'] <= week_end)
         ].copy()
         
-        if not next_week_games.empty:
-            return next_week_games
+        # On Tuesday night (8pm+), we've already filtered to the new week
+        # so no need to filter out old games - they're already excluded
+        
+        if not current_week_games.empty:
+            return current_week_games
     
-    # If no date column or no games in next week, return first 16 upcoming games
+    # Fallback: if no date column or no games in current week, return upcoming games
+    # Include games from recent past to near future
+    if date_col and date_col in upcoming_games_df.columns:
+        today = datetime.now().date()
+        recent_games = upcoming_games_df[
+            (upcoming_games_df['game_date_only'] >= today - timedelta(days=7)) &
+            (upcoming_games_df['game_date_only'] <= today + timedelta(days=7))
+        ].copy()
+        if not recent_games.empty:
+            return recent_games
+    
+    # Last resort: return first 16 games
     return upcoming_games_df.head(16).copy()
 
 def train_model(completed_games_df, date_col, window_size=16):

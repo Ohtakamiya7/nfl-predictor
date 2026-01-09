@@ -31,6 +31,7 @@ def get_predictions():
     else:
         print("Training new model...")
         completed_games, date_col = load_historical_games()
+        print("completed_games shape:", completed_games.shape)  # (rows, cols)
         model, feature_columns = train_model(completed_games, date_col)
         save_model(model, feature_columns, MODEL_FILE)
         # Keep completed_games and date_col for predictions
