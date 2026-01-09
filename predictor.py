@@ -11,7 +11,7 @@ Data Sources:
   - Usage: from sportsdataverse.nfl import nfl_load_pbp
 
 Note: nfl_data_py updates with current season data, but may be incomplete early in the season.
-The script automatically detects available seasons and handles missing data gracefully.
+The script automatically detects available seasons and handles missing data.
 """
 
 import pandas as pd 
